@@ -4,6 +4,7 @@
 Uso, desde la carpeta del proyecto:
     python3 matriculas.py                 # procesa todo lo que haya en la carpeta
     python3 matriculas.py --fecha-reporte 2026-11-03   # fecha que aparece en la portada (por defecto, hoy)
+    python3 matriculas.py --sin-pdf       # solo pptx, sin exportar el PDF
     python3 matriculas.py --por-lamina 4  # programas por diapositiva en cada escuela (por defecto 2)
     python3 matriculas.py --bruto         # reproduce el conteo antiguo (sin quitar devoluciones ni duplicados)
     python3 matriculas.py --anios 3 --salida Salida
@@ -437,6 +438,21 @@ def guardar_excel(hojas, ruta):
             ws.freeze_panes = "B2"
 
 
+def exportar_pdf(pptx):
+    """Convierte el pptx a PDF con LibreOffice (si esta instalado). Devuelve la ruta o None."""
+    import subprocess
+    cand = [shutil.which("soffice"), shutil.which("libreoffice"), "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            r"C:\Program Files\LibreOffice\program\soffice.exe"]
+    exe = next((c for c in cand if c and Path(c).exists()), None)
+    if not exe:
+        print("  PDF omitido: no encontre LibreOffice (https://www.libreoffice.org). Alternativa: en PowerPoint, Archivo > Exportar > PDF."); return None
+    try:
+        subprocess.run([exe, "--headless", "--convert-to", "pdf", "--outdir", str(pptx.parent), str(pptx)], check=True, capture_output=True, timeout=300)
+    except Exception as e:
+        print("  PDF omitido: fallo la conversion con LibreOffice:", e); return None
+    pdf = pptx.with_suffix(".pdf")
+    return pdf if pdf.exists() else None
+
 def a_igual_dia(nv, periodo, d):
     t = (nv["Fecha_pago"].dt.normalize() - ancla(periodo)).dt.days
     return t.le(d).groupby(nv["Programa"]).sum()
@@ -548,6 +564,7 @@ def main():
     ap.add_argument("--figuras", action="store_true", help="guardar tambien las figuras sueltas (incluye una por programa)")
     ap.add_argument("--fecha-reporte", default=None, help="fecha del reporte AAAA-MM-DD (por defecto, hoy)")
     ap.add_argument("--por-lamina", type=int, default=2, help="programas por diapositiva en cada escuela (por defecto 2)")
+    ap.add_argument("--sin-pdf", action="store_true", help="no exportar el PDF")
     a = ap.parse_args()
     rep_fecha = pd.Timestamp(a.fecha_reporte).normalize() if a.fecha_reporte else pd.Timestamp.today().normalize()
     out = Path(a.salida); out.mkdir(exist_ok=True)
@@ -787,6 +804,10 @@ def main():
     ruta_deck = out / f"Matriculas_{rep_fecha:%Y%m%d}.pptx"
     if generar_deck(ruta_deck, lam, pie):
         print("Documento:", ruta_deck)
+        if not a.sin_pdf:
+            pdf = exportar_pdf(ruta_deck)
+            if pdf:
+                print("PDF:", pdf)
     if not a.figuras:
         shutil.rmtree(figdir, ignore_errors=True)
     print("\n".join(lineas)); print("Listo:", out)
