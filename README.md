@@ -10,12 +10,19 @@ El script solo escribe agregados (conteos por programa, escuela y periodo). Ning
 
 Quien quiera reproducir el análisis necesita sus propios reportes, con acceso autorizado a ICEBERG.
 
+## Página interactiva
+
+Ubicación: `Salida/Matriculas.html`. El nombre no lleva fecha para que no cambie entre ejecuciones; la fecha de actualización y la fecha de corte de los datos aparecen dentro de la página. Se abre con doble clic en cualquier navegador, sin servidor ni conexión. Cada ejecución lo sobrescribe.
+
+La carpeta `Salida/` no se versiona, así que la página no está en el repositorio: se genera localmente y se comparte como archivo.
+
 ## Qué produce
 
 Con los reportes en la carpeta, `matriculas.py` genera en `Salida/`:
 
-- `Matriculas_AAAAMMDD.pptx`: documento con portada (fecha de reporte y fecha de corte de los datos), resumen, seguimiento a igual día, proyección de cierre y su método, curvas acumuladas por escuela (dos programas por diapositiva), tablas comparativas por programa y por escuela, brecha frente a la meta, permanencia por cohorte y calidad de los datos.
-- `Matriculas_AAAAMMDD.pdf`: copia en PDF del mismo documento, para compartir. Requiere LibreOffice instalado; si no está, el script lo avisa y sigue sin el PDF.
+- `Matriculas.pptx`: documento con portada (fecha de actualización y fecha de corte de los datos), resumen, seguimiento a igual día, proyección de cierre y su método, curvas acumuladas por escuela (dos programas por diapositiva), tablas comparativas por programa y por escuela, brecha frente a la meta, permanencia por cohorte y calidad de los datos.
+- `Matriculas.html`: página interactiva de un solo archivo, que funciona sin conexión (doble clic). Permite elegir semestre, escuela, programa y cohortes para las curvas, y filtrar, ordenar y descargar en CSV las tablas comparativas. Solo contiene agregados.
+- `Matriculas.pdf`: copia en PDF del mismo documento, para compartir. Requiere LibreOffice instalado; si no está, el script lo avisa y sigue sin el PDF.
 - `Matriculas_resumen.xlsx`: las tablas detrás de cada diapositiva (cumplimiento, tipos de estudiante, curvas diarias, prueba retrospectiva de la proyección, perfil de ingreso).
 - `resumen.txt`: resumen corto en texto.
 
@@ -31,7 +38,7 @@ Opciones:
 | Opción | Efecto |
 |---|---|
 | `--sin-pdf` | No exporta el PDF. |
-| `--fecha-reporte AAAA-MM-DD` | Fecha que aparece en la portada (por defecto, hoy). |
+| `--fecha-reporte AAAA-MM-DD` | Fecha de actualización que se muestra dentro de los archivos (por defecto, hoy). |
 | `--por-lamina N` | Programas por diapositiva en cada escuela (por defecto 2). |
 | `--anios N` | Cohortes a mostrar por semestre (por defecto todas). |
 | `--bruto` | No descarta devoluciones ni duplicados (conteo antiguo). |
@@ -62,5 +69,5 @@ Para cada cohorte cerrada del mismo semestre se calcula qué fracción de su cie
 matriculas.py      script principal
 metas.csv          metas por programa y periodo
 requirements.txt   dependencias
-Salida/            resultados (no versionado)
+Salida/            resultados: pptx, pdf, html interactivo, xlsx (no versionado)
 ```

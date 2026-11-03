@@ -3,7 +3,7 @@
 
 Uso, desde la carpeta del proyecto:
     python3 matriculas.py                 # procesa todo lo que haya en la carpeta
-    python3 matriculas.py --fecha-reporte 2026-11-03   # fecha que aparece en la portada (por defecto, hoy)
+    python3 matriculas.py --fecha-reporte 2026-11-03   # fecha de actualizacion que se muestra dentro de los archivos (por defecto, hoy)
     python3 matriculas.py --sin-pdf       # solo pptx, sin exportar el PDF
     python3 matriculas.py --por-lamina 4  # programas por diapositiva en cada escuela (por defecto 2)
     python3 matriculas.py --bruto         # reproduce el conteo antiguo (sin quitar devoluciones ni duplicados)
@@ -11,7 +11,7 @@ Uso, desde la carpeta del proyecto:
 
 Entradas:  BAN - Reporte de Retención Levantada AAAAPP.xls  (TSV con encabezado, PP = 10 o 20)
            metas.csv  (anio, sem, programa, escuela, meta)
-Salidas :  Salida/Matriculas_AAAAMMDD.pptx (documento con diapositivas), Matriculas_resumen.xlsx, resumen.txt
+Salidas :  Salida/Matriculas.pptx (documento con diapositivas), Matriculas_resumen.xlsx, resumen.txt
            --figuras guarda ademas las figuras sueltas en Salida/Figuras
 Requiere: pandas, matplotlib, openpyxl, python-pptx (pip install python-pptx openpyxl)
 Solo se escriben agregados; ningun dato personal sale de la memoria del script.
@@ -19,7 +19,7 @@ Solo se escriben agregados; ningun dato personal sale de la memoria del script.
 Definicion de matriculado nuevo: Tipo_estudiante == PRIMERA VEZ, sin Devolucion == Si,
 una fila por (Id, Programa) conservando el ultimo pago.
 """
-import argparse, re, shutil, sys, tempfile
+import argparse, base64, json, re, shutil, sys, tempfile
 from pathlib import Path
 import numpy as np, pandas as pd, matplotlib
 matplotlib.use("Agg")
@@ -453,6 +453,23 @@ def exportar_pdf(pptx):
     pdf = pptx.with_suffix(".pdf")
     return pdf if pdf.exists() else None
 
+def b64(ruta):
+    return base64.b64encode(Path(ruta).read_bytes()).decode()
+
+def pts_curva(s, n=140):
+    if not len(s):
+        return []
+    x, y = suave(s); idx = np.unique(np.linspace(0, len(x) - 1, min(n, len(x))).astype(int))
+    return [[round(float(x[i]), 1), round(float(y[i]), 1)] for i in idx]
+
+def recs(df):
+    return json.loads(df.to_json(orient="records", force_ascii=False))
+
+def generar_html(ruta, dash):
+    """Pagina unica y autonoma (sin conexion): solo agregados, nada de datos personales."""
+    datos = json.dumps(dash, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    Path(ruta).write_text(PLANTILLA_HTML.replace("__DATA__", datos), encoding="utf-8")
+
 def a_igual_dia(nv, periodo, d):
     t = (nv["Fecha_pago"].dt.normalize() - ancla(periodo)).dt.days
     return t.le(d).groupby(nv["Programa"]).sum()
@@ -504,8 +521,18 @@ def generar_deck(ruta, laminas, pie):
         if fill:
             c.fill.solid(); c.fill.fore_color.rgb = rgb(fill)
 
+    def ir_a(tb, destino, origen):
+        """Enlace a otra diapositiva: en el cuadro y en el texto (el texto sobrevive a la exportacion a PDF)."""
+        from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+        tb.click_action.target_slide = destino
+        r = tb.text_frame.paragraphs[0].runs[0]; rid = origen.part.relate_to(destino.part, RT.SLIDE)
+        h = r._r.get_or_add_rPr().add_hlinkClick(rid); h.set("action", "ppaction://hlinksldjump")
+
+    info, idx_slide = [], None
     for L in laminas:
-        tipo = L[0]
+        tipo = L[0]; n0 = len(prs.slides)
+        if tipo == "indice":
+            idx_slide = prs.slides.add_slide(prs.slide_layouts[6]); continue
         if tipo == "portada":
             sl = prs.slides.add_slide(prs.slide_layouts[6])
             barra = sl.shapes.add_shape(1, Inches(0.5), Inches(2.55), Inches(0.12), Inches(1.5)); barra.fill.solid(); barra.fill.fore_color.rgb = rgb(ACC); barra.line.fill.background()
@@ -550,6 +577,35 @@ def generar_deck(ruta, laminas, pie):
                 r.height = Inches(alto)
             if len(L) > 5 and L[5]:
                 txt(sl, 0.5 + ancho_t + 0.3, 1.55, 12.83 - (0.5 + ancho_t + 0.3), 5, L[5], 12)
+        if tipo != "portada":
+            info.append((L[1], prs.slides[n0]))
+
+    # indice con enlaces internos (y enlace de regreso en cada diapositiva)
+    if idx_slide is not None:
+        pos = {id(sl): i + 1 for i, sl in enumerate(prs.slides)}
+        entradas, vistos = [], {}
+        for titulo, sl in info:
+            m = re.match(r"(Semestre \d): programas de (.+?)( \(\d+ de \d+\))?$", titulo)
+            if m:
+                k = (m.group(1), m.group(2))
+                if k in vistos:
+                    vistos[k][2] += 1; continue
+                vistos[k] = [None, sl, 1]; entradas.append(vistos[k]); vistos[k][0] = k
+            else:
+                entradas.append([titulo, sl, 1])
+        txt(idx_slide, 0.5, 0.3, 12.3, 0.8, "Índice", 26, True)
+        txt(idx_slide, 0.5, 1.02, 12.3, 0.4, "Haz clic en una línea para ir a la diapositiva. Cada diapositiva tiene un enlace «Índice» arriba a la derecha para volver.", 13, color=SUB)
+        mitad = int(np.ceil(len(entradas) / 2)); alto = min(0.5, 5.4 / max(mitad, 1))
+        for i, (t, sl, n) in enumerate(entradas):
+            if isinstance(t, tuple):
+                t = f"{t[0]}: programas de {t[1]}" + (f" ({n} diapositivas)" if n > 1 else "")
+            t = t if len(t) <= 62 else t[:61] + "…"
+            col, fila = divmod(i, mitad)
+            tb = txt(idx_slide, 0.5 + col * 6.25, 1.6 + fila * alto, 6.0, alto, f"{pos[id(sl)]}.  {t}", 12, color=ACC)
+            ir_a(tb, sl, idx_slide)
+        for titulo, sl in info:
+            tb = txt(sl, 11.6, 0.08, 1.4, 0.3, "↑ Índice", 10, color=ACC, align=PP_ALIGN.RIGHT)
+            ir_a(tb, idx_slide, sl)
     prs.save(ruta); return True
 
 
@@ -562,7 +618,7 @@ def main():
     ap.add_argument("--bruto", action="store_true", help="no quitar devoluciones ni duplicados")
     ap.add_argument("--cerrado", action="store_true", help="tratar el ultimo periodo como cerrado (no en curso)")
     ap.add_argument("--figuras", action="store_true", help="guardar tambien las figuras sueltas (incluye una por programa)")
-    ap.add_argument("--fecha-reporte", default=None, help="fecha del reporte AAAA-MM-DD (por defecto, hoy)")
+    ap.add_argument("--fecha-reporte", default=None, help="fecha de actualizacion AAAA-MM-DD (por defecto, hoy)")
     ap.add_argument("--por-lamina", type=int, default=2, help="programas por diapositiva en cada escuela (por defecto 2)")
     ap.add_argument("--sin-pdf", action="store_true", help="no exportar el PDF")
     a = ap.parse_args()
@@ -584,6 +640,7 @@ def main():
     todos_prog = set(metas.programa); hojas, lineas, brechas = {}, [], {}
     lam_sem, kpis, notas, seg_lamina = [], [], [], None
     lam_proy, bts = [], []
+    dash = {"sems": {}, "tablas": {}, "proy": {}, "backtest": None, "perm": None}
 
     cal = []
     for p, d in D.items():
@@ -689,20 +746,20 @@ def main():
                 mt = int(meta.meta.sum()); rpj = figdir / f"Proyeccion_{actual}.png"
                 fig_proyeccion(tot, actual, dh, est, ok, mt, (lo, hi), tk, col, rpj)
                 desde = fecha_es(ancla(actual) + pd.Timedelta(days=dstar)) if dstar is not None else None
-                if est:
-                    mec = f"A esta fecha el cálculo daría {est[1]:.0f} nuevos (rango {est[0]:.0f} a {est[2]:.0f})."
-                else:
-                    mec = "Aún no hay datos suficientes para estimar."
+                igual = ", ".join(f"{p}: {int(acum_en(cur_c[p], dh))}" for p in cur_c)
+                mec = f"No se publica una cifra: a esta fecha el cálculo arroja un rango tan amplio que no informa. A igual día, las cohortes cerradas llevaban {igual}; {actual} lleva {int(acum_en(tot[actual], dh))}."
                 par = [("Cierre proyectado", {"size": 12, "bold": True, "color": SUB}),
-                       (f"{est[1]:.0f}" if ok else "No confiable aún", {"size": 30, "bold": True, "color": ACC}),
+                       (f"{est[1]:.0f}" if ok else "Sin proyección aún", {"size": 30, "bold": True, "color": ACC}),
                        (f"Rango {est[0]:.0f} a {est[2]:.0f}. Meta {mt}." if ok else mec, {"size": 12}),
                        (f"Error máximo de la prueba retrospectiva a esta fecha: {fmt_err(err_hoy)}. Umbral para confiar: {100 * UMBRAL:.0f}%.", {"size": 12}),
                        (f"Según esa prueba, será confiable desde {desde}." if desde else "En las cohortes anteriores el error no bajó de forma sostenida del umbral.", {"size": 12}),
                        ("Mientras tanto, lo que sí informa es el ritmo frente a las cohortes anteriores a igual día (diapositiva de seguimiento). Los puntos de la gráfica marcan dónde estaba cada cohorte ese día.", {"size": 12, "color": SUB})]
                 lam_proy.append(("mixto", f"Proyección de cierre de {actual}: " + (f"{est[1]:.0f} nuevos (rango {est[0]:.0f} a {est[2]:.0f})" if ok else "todavía no es confiable"),
                                  f"Cohorte {actual} frente a cohortes cerradas del mismo semestre  ·  datos al {fecha_es(corte[actual])}", rpj, par, "izq", 0.66))
-                lineas.append(f"Proyeccion {actual}: " + (f"{est[1]:.0f} (rango {est[0]:.0f} a {est[2]:.0f})" if ok else f"no confiable aun (error de prueba a esta fecha {fmt_err(err_hoy)}); calculo mecanico {est[1]:.0f}" if est else "sin datos") + (f"; confiable desde {desde}" if desde else ""))
-                notas.append(f"Proyección de cierre de {actual}: " + (f"{est[1]:.0f} nuevos (rango {est[0]:.0f} a {est[2]:.0f})." if ok else "todavía no es confiable") + (f" Según la prueba retrospectiva lo será desde {desde}." if (desde and not ok) else ""))
+                dash["proy"][sem] = {"titulo": f"Proyección de cierre de {actual}: " + (f"{est[1]:.0f} nuevos (rango {est[0]:.0f} a {est[2]:.0f})" if ok else "todavía no es confiable"),
+                                     "par": [[t, o] if isinstance(t, str) else list(t) for t, o in [(x if isinstance(x, tuple) else (x, {})) for x in par]], "img": b64(rpj)}
+                lineas.append(f"Proyeccion {actual}: " + (f"{est[1]:.0f} (rango {est[0]:.0f} a {est[2]:.0f})" if ok else f"no confiable aun (error de prueba a esta fecha {fmt_err(err_hoy)}); no se publica cifra" if est else "sin datos") + (f"; confiable desde {desde}" if desde else ""))
+                notas.append(f"Proyección de cierre de {actual}: " + (f"{est[1]:.0f} nuevos (rango {est[0]:.0f} a {est[2]:.0f})." if ok else "todavía no hay proyección confiable") + (f" Según la prueba retrospectiva lo será desde {desde}." if (desde and not ok) else ""))
         escs = [e for e in ["IA&D", "NL&S", "TD"] if e in set(meta.escuela)] + sorted(set(meta.escuela) - {"IA&D", "NL&S", "TD"})
         for esc in escs:
             progs = list(meta[meta.escuela == esc].sort_values("meta", ascending=False).index); gr = trozos(progs, max(1, a.por_lamina))
@@ -711,6 +768,28 @@ def main():
                 fig_grid(pg, curs, meta.meta, per, actual, (lo, hi), tk, col, rg)
                 lam.append(("imagen", f"Semestre {sem[0]}: programas de {esc}" + (f" ({j + 1} de {len(gr)})" if len(gr) > 1 else ""),
                             f"Cohortes {', '.join(per)}. Azul: {actual}{' (en curso)' if encurso else ''}. Rojo: meta{' de referencia' if ref else ''}. Título de cada panel: nuevos/meta de {actual}. Curvas semanales suavizadas.", rg))
+        # ---- datos para la pagina interactiva
+        escs_d = [e for e in ["IA&D", "NL&S", "TD"] if e in set(meta.escuela)] + sorted(set(meta.escuela) - {"IA&D", "NL&S", "TD"})
+        dash["sems"][sem] = {
+            "periodos": per, "actual": actual, "encurso": encurso, "ref": bool(ref), "anio_meta": int(anio_meta),
+            "anclas": {p: str(ancla(p).date()) for p in per}, "cortes": {p: str(corte[p].date()) for p in per},
+            "colores": {p: str(col[p]) for p in per}, "xlim": [float(lo), float(hi)],
+            "ticks": [[float(t) for t in tk[0]], [str(t) for t in tk[1]]],
+            "utb": {"meta": int(meta.meta.sum()), "curvas": {p: pts_curva(tot[p]) for p in per}},
+            "escuelas": {e: {"meta": int(meta[meta.escuela == e].meta.sum()),
+                             "curvas": {p: pts_curva(curva(nvm[p][nvm[p].Programa.isin(meta.index[meta.escuela == e])], p)) for p in per}} for e in escs_d},
+            "programas": {prog: {"escuela": meta.escuela[prog], "meta": int(meta.meta[prog]), "curvas": {p: pts_curva(curs[prog][p]) for p in per}} for prog in meta.index}}
+        for p in per:
+            if ((metas["anio"] == int(p[:4])) & (metas["sem"] == int(p[4:]))).any():
+                mp_, refp = meta_para(metas, p)[0], False
+            elif p == actual:
+                mp_, refp = meta, True
+            else:
+                continue
+            py_ = f"{int(p[:4]) - 1}{sem}"; pv_ = (py_, NV[py_].Programa.value_counts()) if py_ in NV else None
+            tcp = tabla_comparativa(p, DEP, mp_, pv_); tep = resumen_escuelas(tcp).drop(index="TOTAL")
+            dash["tablas"][p] = {"sem": sem, "cerrada": p not in en_curso, "ref": refp, "corte": str(corte[p].date()), "prev": py_ if pv_ else None,
+                                 "prog": recs(tcp.reset_index()), "esc": recs(tep.reset_index())}
         lam_sem.append(lam)
 
     anios = sorted({int(p[:4]) for p in brechas if p.endswith("10")} & {int(p[:4]) for p in brechas if p.endswith("20")})
@@ -741,6 +820,7 @@ def main():
         lineas.append("Permanencia a +1 semestre: " + ", ".join(f"{f[0]} {100 * f[2][0]:.0f}%" for f in filas))
         p1 = [100 * f[2][0] for f in filas]
         kpis.append({"label": "Permanencia a +1 semestre", "valor": f"{p1[-1]:.0f}%", "sub": f"cohorte {filas[-1][0]}. Cohortes anteriores: {min(p1[:-1]):.0f}% a {max(p1[:-1]):.0f}%." if len(p1) > 1 else f"cohorte {filas[-1][0]}."})
+        dash["perm"] = {"img": b64(rp), "nota": "Porcentaje de cada cohorte que vuelve a aparecer con pago en los semestres siguientes. No distingue deserción de grado, pausa o cambio de programa."}
         lam_perm.append(("imagen", "Permanencia de los nuevos por cohorte", "Porcentaje que vuelve a aparecer con pago en los semestres siguientes. No distingue deserción de grado, pausa o cambio de programa.", rp))
 
     perf = []; allc = pd.concat([NV[p].Ciudad.fillna("SIN DATO") for p in files]).value_counts(); top = list(allc.index[:6])
@@ -768,8 +848,9 @@ def main():
               "Comparar a igual día mide ritmo y no proyecta el cierre: en las cohortes 2024-1 a 2026-1 las diferencias de noviembre y diciembre se redujeron en enero."]
     ult = max(corte.values())
     lam = [("portada", "Matrículas de primera vez", [f"Monitoreo por cohortes, {min(files)} a {max(files)}",
-                                                  (f"Fecha de reporte: {fecha_es(rep_fecha)}", {"bold": True, "color": INK}), f"Datos al {fecha_es(ult)}"]),
+                                                  (f"Fecha de actualización: {fecha_es(rep_fecha)}", {"bold": True, "color": INK}), f"Datos al {fecha_es(ult)}"]),
            ("resumen", "Resumen", f"Reportes BAN (Retención Levantada) al {fecha_es(ult)}", kpis[:4], notas)]
+    lam.insert(1, ("indice",))
     if seg_lamina:
         lam.append(seg_lamina)
     lam += lam_proy
@@ -784,6 +865,7 @@ def main():
                   "Supone que el calendario de pagos se repite. Si cambian las fechas de matrícula o las políticas de pago, la proyección pierde validez.",
                   "Se calcula solo para el total de la UTB, porque con cifras por programa la prueba retrospectiva es demasiado ruidosa.",
                   "La curva diaria de cada cohorte y el error de la prueba por día están en el Excel (hojas Curva_UTB_diaria y Proyeccion_prueba)."]
+        dash["metodo"] = [[x, {"bold": True}] if False else (list(x) if isinstance(x, tuple) else x) for x in metodo]
         lam.append(("texto", "Cómo se calcula la proyección de cierre", "Se usa solo con cohortes cerradas del mismo semestre y se valida contra ellas.", metodo))
         rbt = figdir / "Proyeccion_prueba.png"; fig_backtest(bts, rbt)
         par = [("Qué tan bien funcionó", {"size": 14, "bold": True})]
@@ -795,22 +877,159 @@ def main():
             par.append((f"Semestre {b['sem'][0]}, error máximo", {"size": 12, "bold": True, "color": SUB}))
             par += [(x, {"size": 12}) for x in fila]
             par.append((f"Confiable desde {fecha_es(f0 + pd.Timedelta(days=b['dstar']))}." if b["dstar"] is not None else "No alcanzó el umbral de forma sostenida.", {"size": 12, "color": ACC}))
+        dash["backtest"] = {"img": b64(rbt), "par": [list(x) if isinstance(x, tuple) else x for x in par]}
         lam.append(("mixto", "Prueba retrospectiva de la proyección", "Qué habría proyectado el método en cada fecha para las cohortes que ya cerraron.", rbt, par, "izq", 0.62))
     for l in lam_sem:
         lam += l
     lam += lam_brecha + lam_perm
     lam.append(("tabla", "Calidad de los datos por periodo", "Lo que se descontó para llegar al conteo de primera vez.", cq.rename_axis("Periodo"), 11.5))
-    pie = f"Fuente: reportes BAN, Retención Levantada. Primera vez, " + ("conteo bruto" if a.bruto else "sin devoluciones ni duplicados") + f". Datos al {fecha_es(ult)}. Reporte del {fecha_es(rep_fecha)}."
-    ruta_deck = out / f"Matriculas_{rep_fecha:%Y%m%d}.pptx"
+    pie = f"Fuente: reportes BAN, Retención Levantada. Primera vez, " + ("conteo bruto" if a.bruto else "sin devoluciones ni duplicados") + f". Datos al {fecha_es(ult)}. Actualizado el {fecha_es(rep_fecha)}."
+    ruta_deck = out / "Matriculas.pptx"
     if generar_deck(ruta_deck, lam, pie):
         print("Documento:", ruta_deck)
         if not a.sin_pdf:
             pdf = exportar_pdf(ruta_deck)
             if pdf:
                 print("PDF:", pdf)
+    dash.update({"titulo": "Matrículas de primera vez", "reporte": fecha_es(rep_fecha), "corte": fecha_es(ult),
+                 "definicion": "primera vez, " + ("conteo bruto" if a.bruto else "sin devoluciones ni duplicados"),
+                 "kpis": kpis[:4], "notas": notas, "calidad": {"cols": ["Periodo"] + list(cq.columns), "rows": [[str(i)] + [str(v) for v in r] for i, r in zip(cq.index, cq.values)]}})
+    dash.setdefault("metodo", [])
+    ruta_html = out / "Matriculas.html"; generar_html(ruta_html, dash); print("Pagina interactiva:", ruta_html)
     if not a.figuras:
         shutil.rmtree(figdir, ignore_errors=True)
     print("\n".join(lineas)); print("Listo:", out)
+
+
+PLANTILLA_HTML = r'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Matrículas de primera vez</title>
+<style>
+:root{--bg:#fff;--fg:#1f2937;--sub:#6b7280;--line:#e5e7eb;--card:#f3f4f6;--acc:#1d4ed8;--bad:#c2410c;--good:#0f766e;--warn:#b45309;--grid:#e5e7eb}
+
+*{box-sizing:border-box}:root{color-scheme:light}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,"Segoe UI",Calibri,sans-serif}
+header{padding:18px 24px 0;max-width:1280px;margin:auto}h1{margin:0;font-size:24px}.sub{color:var(--sub);font-size:13px;margin:2px 0 12px}
+nav{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--line);max-width:1280px;margin:auto;padding:0 24px}
+nav button{background:none;border:0;border-bottom:3px solid transparent;color:var(--sub);padding:9px 14px;font:inherit;cursor:pointer}
+nav button.on{color:var(--fg);border-color:var(--acc);font-weight:600}
+main{max-width:1280px;margin:auto;padding:18px 24px 48px}section{display:none}section.on{display:block}
+.ctl{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:end;margin-bottom:14px}.ctl label{display:flex;flex-direction:column;font-size:12px;color:var(--sub);gap:3px}
+select,input[type=search]{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);min-width:150px}
+.btn{font:inherit;padding:5px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px}.kpi{background:var(--card);border-radius:8px;padding:12px 14px}
+.kpi b{display:block;font-size:12px;color:var(--sub)}.kpi span{display:block;font-size:28px;font-weight:700;color:var(--acc)}.kpi small{color:var(--fg);font-size:12px}
+.leg{display:flex;flex-wrap:wrap;gap:6px 16px;margin:6px 0 10px;font-size:13px}.leg label{display:flex;align-items:center;gap:6px;cursor:pointer}.sw{width:18px;height:3px;display:inline-block;border-radius:2px}
+.wrap{position:relative}svg{width:100%;height:auto;display:block}svg text{fill:var(--sub);font-size:11px}svg .t{fill:var(--fg);font-weight:600}
+.tip{position:absolute;pointer-events:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 9px;font-size:12px;box-shadow:0 2px 8px #0003;display:none;white-space:nowrap}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:16px}.cell h4{margin:0 0 2px;font-size:13px}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:4px 8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{background:var(--fg);color:var(--bg);cursor:pointer;position:sticky;top:0;user-select:none}th:first-child,td:first-child,th.l,td.l{text-align:left}
+tr.tot td{font-weight:700;background:var(--card)}.g{color:var(--good);font-weight:600}.m{color:var(--warn);font-weight:600}.b{color:var(--bad);font-weight:600}
+.tw{overflow-x:auto;max-height:72vh}.note{color:var(--sub);font-size:12.5px;margin:6px 0 10px}img{max-width:100%;height:auto;border-radius:6px}
+.two{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:20px}@media(max-width:900px){.two{grid-template-columns:1fr}}
+h3{margin:18px 0 6px}ul.n{padding-left:18px}p.big{font-size:30px;font-weight:700;color:var(--acc);margin:2px 0}
+</style></head><body>
+<header><h1 id="h1"></h1><div class="sub" id="sub"></div></header>
+<nav id="nav"></nav>
+<main>
+<section id="resumen"></section>
+<section id="curvas"><div class="ctl">
+ <label>Semestre<select id="cs"></select></label><label>Vista<select id="cv"></select></label>
+ <label id="lp" style="display:none">Programa<select id="cp"></select></label></div>
+ <div class="leg" id="cleg"></div><div id="cout"></div>
+ <p class="note">Curvas semanales suavizadas. Pase el cursor sobre la gráfica para ver el valor de cada cohorte en un mismo día del ciclo. La línea roja discontinua es la meta.</p></section>
+<section id="tablas"><div class="ctl">
+ <label>Cohorte<select id="tp"></select></label><label>Nivel<select id="tn"><option value="prog">Por programa</option><option value="esc">Por escuela</option></select></label>
+ <label>Escuela<select id="te"></select></label><label>Buscar<input type="search" id="tq" placeholder="programa"></label>
+ <button class="btn" id="tcsv">Descargar CSV</button></div><div class="note" id="tnote"></div><div class="tw" id="tout"></div></section>
+<section id="proy"></section>
+<section id="perm"></section>
+<section id="calidad"></section>
+</main>
+<script>
+const D=__DATA__;
+const $=s=>document.querySelector(s), h=(t,a={},c="")=>{const e=document.createElement(t);Object.assign(e,a);if(c)e.innerHTML=c;return e};
+const fmt=(v,d=0)=>v==null||isNaN(v)?"":Number(v).toLocaleString("es-CO",{minimumFractionDigits:d,maximumFractionDigits:d});
+const MES=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+const fecha=(iso,k=0)=>{const d=new Date(iso+"T00:00:00");d.setDate(d.getDate()+Math.round(k));return d.getDate()+" "+MES[d.getMonth()]+" "+d.getFullYear()};
+const esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+$("#h1").textContent=D.titulo;$("#sub").textContent="Fecha de actualización: "+D.reporte+"  ·  Datos al "+D.corte+"  ·  "+D.definicion;
+const TABS=[["resumen","Resumen"],["curvas","Curvas"],["tablas","Tablas"],["proy","Proyección"],["perm","Permanencia"],["calidad","Método y calidad de datos"]];
+TABS.forEach(([id,t],i)=>{const b=h("button",{textContent:t});b.onclick=()=>go(id);b.dataset.id=id;$("#nav").append(b)});
+function go(id){document.querySelectorAll("section").forEach(s=>s.classList.toggle("on",s.id===id));document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.id===id));history.replaceState(null,"","#"+id)}
+/* ---------- resumen ---------- */
+$("#resumen").innerHTML='<div class="kpis">'+D.kpis.map(k=>`<div class="kpi"><b>${esc(k.label)}</b><span>${esc(k.valor)}</span><small>${esc(k.sub)}</small></div>`).join("")+'</div><h3>Lectura rápida</h3><ul class="n">'+D.notas.map(n=>`<li>${esc(n)}</li>`).join("")+'</ul>'+
+ '<h3>Ir a</h3><p>'+TABS.slice(1).map(([id,t])=>`<a href="#${id}" onclick="go('${id}');return false" style="margin-right:16px">${t}</a>`).join("")+'</p>';
+/* ---------- grafica ---------- */
+function nice(v){const e=Math.pow(10,Math.floor(Math.log10(v))),f=v/e;return (f<=1?1:f<=2?2:f<=5?5:10)*e}
+function interp(pts,x){if(!pts.length||x<pts[0][0]||x>pts[pts.length-1][0])return null;let lo=0,hi=pts.length-1;while(hi-lo>1){const m=(lo+hi)>>1;pts[m][0]<=x?lo=m:hi=m}const a=pts[lo],b=pts[hi];return b[0]===a[0]?a[1]:a[1]+(b[1]-a[1])*(x-a[0])/(b[0]-a[0])}
+function chart(o){const W=o.w,H=o.h,sm=o.small,m={l:sm?32:44,r:sm?8:14,t:sm?8:12,b:24},[x0,x1]=o.xlim;let ymax=o.meta||0;
+ o.series.forEach(s=>s.pts.forEach(p=>{if(p[1]>ymax)ymax=p[1]}));ymax=(ymax||1)*1.08;
+ const X=x=>m.l+(x-x0)/(x1-x0)*(W-m.l-m.r),Y=y=>H-m.b-y/ymax*(H-m.t-m.b),st=nice(ymax/(sm?4:6));let g="";
+ for(let v=0;v<=ymax;v+=st)g+=`<line x1="${m.l}" x2="${W-m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${m.l-5}" y="${Y(v)+4}" text-anchor="end">${fmt(v)}</text>`;
+ o.ticks[0].forEach((p,i)=>{if(p>=x0&&p<=x1)g+=`<text x="${X(p)}" y="${H-6}" text-anchor="middle">${o.ticks[1][i]}</text>`});
+ if(o.meta)g+=`<line x1="${m.l}" x2="${W-m.r}" y1="${Y(o.meta)}" y2="${Y(o.meta)}" stroke="var(--bad)" stroke-dasharray="5 4"/>`+(sm?"":`<text x="${m.l+4}" y="${Y(o.meta)-4}" style="fill:var(--bad)">Meta ${fmt(o.meta)}</text>`);
+ o.series.forEach(s=>{if(!s.pts.length)return;g+=`<path d="M${s.pts.map(p=>X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1)).join("L")}" fill="none" stroke="${s.color}" stroke-width="${s.act?(sm?2.4:3):1.6}" stroke-linejoin="round"/>`;
+  if(s.act){const q=s.pts[s.pts.length-1];g+=`<circle cx="${X(q[0])}" cy="${Y(q[1])}" r="3.5" fill="${s.color}"/>`}});
+ return {svg:`<svg viewBox="0 0 ${W} ${H}" role="img">${g}<line class="cur" y1="${m.t}" y2="${H-m.b}" stroke="var(--fg)" stroke-dasharray="2 3" style="display:none"/></svg>`,X,Y,m,W,x0,x1}}
+function hover(box,c,o){const svg=box.querySelector("svg"),cur=svg.querySelector(".cur"),tip=h("div",{className:"tip"});box.append(tip);
+ svg.onmousemove=e=>{const r=svg.getBoundingClientRect(),px=(e.clientX-r.left)/r.width*c.W;if(px<c.m.l||px>c.W-c.m.r){svg.onmouseleave();return}
+  const k=Math.round(c.x0+(px-c.m.l)/(c.W-c.m.l-c.m.r)*(c.x1-c.x0));cur.setAttribute("x1",c.X(k));cur.setAttribute("x2",c.X(k));cur.style.display="";
+  tip.innerHTML=`<b>Día ${k>=0?"+":""}${k} del ciclo</b><br>`+o.series.map(s=>{const v=interp(s.pts,k);return v==null?"":`<span style="color:${s.color}">●</span> ${s.label} (${fecha(s.ancla,k)}): <b>${fmt(v)}</b>`}).filter(Boolean).join("<br>");
+  tip.style.display="block";const bw=box.clientWidth;let l=(e.clientX-box.getBoundingClientRect().left)+14;if(l>bw-tip.offsetWidth)l-=tip.offsetWidth+28;tip.style.left=l+"px";tip.style.top="10px"};
+ svg.onmouseleave=()=>{cur.style.display="none";tip.style.display="none"}}
+/* ---------- curvas ---------- */
+const sems=Object.keys(D.sems);let activos={};
+sems.forEach(s=>$("#cs").append(h("option",{value:s,textContent:"Semestre "+s[0]+" ("+D.sems[s].actual+")"})));
+function opcionesVista(){const S=D.sems[$("#cs").value];$("#cv").innerHTML="";$("#cv").append(h("option",{value:"utb",textContent:"Total UTB"}));
+ Object.keys(S.escuelas).forEach(e=>{$("#cv").append(h("option",{value:"e:"+e,textContent:"Escuela "+e+" (total)"}));$("#cv").append(h("option",{value:"g:"+e,textContent:"Escuela "+e+": todos los programas"}))});
+ $("#cv").append(h("option",{value:"p",textContent:"Un programa…"}));
+ $("#cp").innerHTML="";Object.entries(S.programas).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([p,v])=>$("#cp").append(h("option",{value:p,textContent:p+" ("+v.escuela+")"})));
+ activos={};S.periodos.forEach(p=>activos[p]=true)}
+function serie(S,p,pts,lab){return {label:lab||p,color:S.colores[p],pts,act:p===S.actual,ancla:S.anclas[p]}}
+function dibujaCurvas(){const S=D.sems[$("#cs").value],v=$("#cv").value;$("#lp").style.display=v==="p"?"":"none";const out=$("#cout");out.innerHTML="";
+ const mk=(curvas,meta,w,h_,small)=>({w,h:h_,small,xlim:S.xlim,ticks:S.ticks,meta,series:S.periodos.filter(p=>activos[p]).map(p=>serie(S,p,curvas[p]||[]))});
+ const leg=$("#cleg");leg.innerHTML="";S.periodos.forEach(p=>{const l=h("label");const cb=h("input",{type:"checkbox",checked:activos[p]});cb.onchange=()=>{activos[p]=cb.checked;dibujaCurvas()};
+  l.append(cb,h("span",{className:"sw",style:"background:"+S.colores[p]}),document.createTextNode(p+(p===S.actual&&S.encurso?" (en curso)":"")));leg.append(l)});
+ if(v.startsWith("g:")){const e=v.slice(2),grid=h("div",{className:"grid"});Object.entries(S.programas).filter(([_,x])=>x.escuela===e).sort((a,b)=>b[1].meta-a[1].meta).forEach(([p,x])=>{
+   const c=h("div",{className:"cell"}),a=x.curvas[S.actual]||[],n=a.length?Math.round(a[a.length-1][1]):0;c.append(h("h4",{textContent:p+"   "+n+" / "+x.meta}));
+   const o=mk(x.curvas,x.meta,420,230,true),r=chart(o),b=h("div",{className:"wrap"});b.innerHTML=r.svg;hover(b,r,o);c.append(b);grid.append(c)});out.append(grid);return}
+ let curvas,meta,titulo;if(v==="utb"){curvas=S.utb.curvas;meta=S.utb.meta;titulo="Total UTB"}
+ else if(v.startsWith("e:")){const e=S.escuelas[v.slice(2)];curvas=e.curvas;meta=e.meta;titulo="Escuela "+v.slice(2)}
+ else{const x=S.programas[$("#cp").value];curvas=x.curvas;meta=x.meta;titulo=$("#cp").value}
+ const a=curvas[S.actual]||[],n=a.length?Math.round(a[a.length-1][1]):0;
+ out.append(h("h3",{textContent:titulo+": "+n+" nuevos"+(S.encurso?" a la fecha":"")+" · meta "+fmt(meta)+(S.ref?" (referencia "+S.anio_meta+")":"")}));
+ const o=mk(curvas,meta,980,430,false),r=chart(o),b=h("div",{className:"wrap"});b.innerHTML=r.svg;hover(b,r,o);out.append(b)}
+$("#cs").onchange=()=>{opcionesVista();dibujaCurvas()};$("#cv").onchange=dibujaCurvas;$("#cp").onchange=dibujaCurvas;
+/* ---------- tablas ---------- */
+const periodosT=Object.keys(D.tablas).sort().reverse();periodosT.forEach(p=>$("#tp").append(h("option",{value:p,textContent:p+(D.tablas[p].cerrada?" (cerrada)":" (en curso)")})));
+["Todas"].concat([...new Set(Object.values(D.tablas).flatMap(t=>t.prog.map(r=>r.Escuela)))]).forEach(e=>$("#te").append(h("option",{value:e==="Todas"?"":e,textContent:e})));
+let orden={col:null,asc:true},tcols=[],tfilas=[];
+function drawT(){const T=D.tablas[$("#tp").value],niv=$("#tn").value,q=$("#tq").value.toLowerCase(),fe=$("#te").value;let rows=T[niv].filter(r=>(!fe||r.Escuela===fe||r.Programa===undefined&&r.Escuela===fe)&&(!q||String(r.Programa||r.Escuela).toLowerCase().includes(q)));
+ $("#te").disabled=niv==="esc"&&false;const cols=Object.keys(T[niv][0]||{}),txt=["Programa","Escuela"],calc=["Cumpl. %","SPC %"],clave=cols[0];
+ if(orden.col&&cols.includes(orden.col))rows=[...rows].sort((a,b)=>{const x=a[orden.col],y=b[orden.col];return (typeof x==="string"?x.localeCompare(y):x-y)*(orden.asc?1:-1)});
+ const tot={};cols.forEach(c=>{if(!txt.includes(c)&&!calc.includes(c))tot[c]=rows.reduce((s,r)=>s+(r[c]||0),0)});tot[clave]="TOTAL";if(cols.includes("Escuela")&&clave!=="Escuela")tot.Escuela="";
+ tot["Cumpl. %"]=tot.Meta?100*tot["Primera vez"]/tot.Meta:null;tot["SPC %"]=(tot["Primera vez"]+tot.Meta)?200*(tot["Primera vez"]-tot.Meta)/(tot["Primera vez"]+tot.Meta):null;
+ const cls=(c,v)=>{if(v==null)return"";if(c==="Cumpl. %"&&T.cerrada)return v>=100?"g":v>=90?"m":"b";if(c==="Dif. meta")return T.cerrada?(v>=0?"g":"b"):"";return""};
+ const cell=(c,v)=>{if(txt.includes(c))return`<td class="l">${esc(v)}</td>`;const d=calc.includes(c)?1:0,s=c==="Dif. meta"&&v>0?"+":"";return`<td class="${cls(c,v)}">${v==null?"":s+fmt(v,d)}</td>`};
+ tcols=cols;tfilas=rows.concat([tot]);
+ $("#tout").innerHTML="<table><thead><tr>"+cols.map(c=>`<th data-c="${esc(c)}" class="${txt.includes(c)?"l":""}">${esc(c)}${orden.col===c?(orden.asc?" ▲":" ▼"):""}</th>`).join("")+"</tr></thead><tbody>"+rows.map(r=>"<tr>"+cols.map(c=>cell(c,r[c])).join("")+"</tr>").join("")+'<tr class="tot">'+cols.map(c=>cell(c,tot[c])).join("")+"</tr></tbody></table>";
+ $("#tout").querySelectorAll("th").forEach(th=>th.onclick=()=>{const c=th.dataset.c;orden=orden.col===c?{col:c,asc:!orden.asc}:{col:c,asc:true};drawT()});
+ $("#tnote").textContent="Datos al "+fecha(T.corte)+". "+(T.cerrada?"Cohorte cerrada: verde si cumple la meta, ámbar entre 90% y 100%, rojo por debajo de 90%. ":"Cohorte en curso: el cumplimiento es parcial porque aún suma pagos. ")+(T.ref?"Metas de referencia (no hay meta cargada para este año). ":"")+"Cumpl. % = primera vez / meta. SPC % = 200·(real − meta)/(real + meta)."+(T.prev?" «Cierre "+T.prev+"» es el total de primera vez del mismo semestre del año anterior.":"")}
+["tp","tn","te"].forEach(i=>$("#"+i).onchange=()=>{orden={col:null,asc:true};drawT()});$("#tq").oninput=drawT;
+$("#tcsv").onclick=()=>{const L=[tcols.join(",")].concat(tfilas.map(r=>tcols.map(c=>{const v=r[c];return typeof v==="string"?'"'+v.replace(/"/g,'""')+'"':(v==null?"":v)}).join(",")));
+ const a=h("a",{href:URL.createObjectURL(new Blob(["﻿"+L.join("\n")],{type:"text/csv"})),download:"Comparativa_"+$("#tp").value+".csv"});a.click()};
+/* ---------- proyeccion, permanencia, calidad ---------- */
+const par=l=>l.map(x=>{const t=Array.isArray(x)?x[0]:x,o=Array.isArray(x)?x[1]:{};return o.size>=28?`<p class="big">${esc(t)}</p>`:o.bold?`<p><b>${esc(t)}</b></p>`:`<p>${esc(t)}</p>`}).join("");
+let ph="";sems.forEach(s=>{const P=D.proy[s];ph+=`<h3>Semestre ${s[0]}</h3>`;ph+=P?`<h3 style="margin-top:0">${esc(P.titulo)}</h3><div class="two"><div><img src="data:image/png;base64,${P.img}"></div><div>${par(P.par)}</div></div>`:'<p class="note">No hay cohorte en curso en este semestre: no hay proyección que hacer.</p>'});
+if(D.backtest)ph+=`<h3>Prueba retrospectiva</h3><div class="two"><div><img src="data:image/png;base64,${D.backtest.img}"></div><div>${par(D.backtest.par)}</div></div>`;
+$("#proy").innerHTML=ph;
+$("#perm").innerHTML=D.perm?`<h3>Permanencia de los nuevos por cohorte</h3><p class="note">${esc(D.perm.nota)}</p><img src="data:image/png;base64,${D.perm.img}">`:"<p>Sin datos suficientes.</p>";
+$("#calidad").innerHTML="<h3>Calidad de los datos por periodo</h3><div class='tw'><table><thead><tr>"+D.calidad.cols.map((c,i)=>`<th class="${i?"":"l"}">${esc(c)}</th>`).join("")+"</tr></thead><tbody>"+D.calidad.rows.map(r=>"<tr>"+r.map((v,i)=>`<td class="${i?"":"l"}">${esc(v)}</td>`).join("")+"</tr>").join("")+"</tbody></table></div><h3>Cómo se calcula la proyección</h3>"+par(D.metodo);
+opcionesVista();dibujaCurvas();drawT();go((location.hash||"#resumen").slice(1).replace(/[^a-z]/g,"")||"resumen");if(!document.querySelector("section.on"))go("resumen");
+</script></body></html>
+'''
+
 
 if __name__ == "__main__":
     main()
