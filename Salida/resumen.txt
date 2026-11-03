@@ -1,0 +1,5 @@
+202610 (cerrada): 849 nuevos de 895 (meta), 94.9%; 13 programas suman -102, 8 suman +56, neto -46
+202710 EN CURSO (dia +0, datos al 1 nov 2026): 31 nuevos; a igual dia 202410: 6, 202510: 13, 202610: 21
+Proyeccion 202710: no confiable aun (error de prueba a esta fecha 142%); calculo mecanico 1855; confiable desde 11 ene 2027
+202620 (cerrada): 213 nuevos de 325 (meta), 65.5%; 17 programas suman -123, 3 suman +11, neto -112
+Permanencia a +1 semestre: 202410 91%, 202420 90%, 202510 89%, 202520 89%, 202610 93%

@@ -1,0 +1,6 @@
+pandas
+numpy
+matplotlib
+pillow
+openpyxl
+python-pptx
