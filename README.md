@@ -12,7 +12,7 @@ Quien quiera reproducir el análisis necesita sus propios reportes, con acceso a
 
 ## Página interactiva
 
-Ubicación: `Salida/Matriculas.html`. El nombre no lleva fecha para que no cambie entre ejecuciones; la fecha de actualización y la fecha de corte de los datos aparecen dentro de la página. Se abre con doble clic en cualquier navegador, sin servidor ni conexión. Cada ejecución lo sobrescribe.
+Ubicación: [Matriculas.html](https://github.com/sierraporta/matriculas-UTB/blob/main/Salida/Matriculas.html)
 
 La carpeta `Salida/` no se versiona, así que la página no está en el repositorio: se genera localmente y se comparte como archivo.
 
